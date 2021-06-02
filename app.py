@@ -3,7 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, helpers, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
 from flask_security import Security, SQLAlchemyUserDatastore, UserMixin, RoleMixin, current_user
-from flask_security.utils import hash_password
+from sqlalchemy.orm import backref
 from json import load
 
 
@@ -40,7 +40,7 @@ users_to_roles = db.Table(
 
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
-    username = db.Column(db.String(30), unique=True)
+    email = db.Column(db.String(30), unique=True)
     password = db.Column(db.String(255))
     active = db.Column(db.Boolean())
     confirmed_at = db.Column(db.DateTime())
@@ -53,13 +53,34 @@ class Role(db.Model, RoleMixin):
     description = db.Column(db.String(255))
 
 
+class NameToAddress(db.Model):
+    id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
+    name = db.Column(db.String, unique=True)
+    address_id = db.Column(db.Integer, db.ForeignKey('addresses.id'))
+    address = db.relationship('Address')
+
+
 class Address(db.Model):
     __tablename__ = "addresses"
     id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
-    address = db.Column(db.String)
+    parent_id = db.Column(db.Integer, db.ForeignKey('addresses.id'))
+    parent_address = db.relationship('Address', remote_side=[id])
+    type = db.Column(db.String)
 
-    def __repr__(self):
-        return '<Address %r>' % self.address
+    def __repr__(self, object_to_repr=None):
+        self_name = NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(address=self).first().name if \
+            NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(address=self).first() else self.id
+        if not self.parent_address:
+            return f'<Address {self.type} {self_name}>'
+        elif not object_to_repr:
+            return f'<Address {self.__repr__(object_to_repr=self.parent_address)} {self.type} {self_name}>'
+        object_to_repr_name = NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(
+            address=object_to_repr).first().name if NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(
+            address=object_to_repr).first() else object_to_repr.id
+        if object_to_repr.parent_address:
+            return f'{self.__repr__(object_to_repr=object_to_repr.parent_address)} {object_to_repr.type} {object_to_repr_name}'
+        else:
+            return f'{object_to_repr.type} {object_to_repr_name}'
 
 
 class Item(db.Model):
@@ -76,14 +97,13 @@ user_datastore = SQLAlchemyUserDatastore(db, User, Role)
 security = Security(app, user_datastore)
 admin.add_view(ModelView(Item, db.session))
 admin.add_view(ModelView(Address, db.session))
+admin.add_view(ModelView(NameToAddress, db.session))
 
 
 @app.before_first_request
 def preparation():
     db.drop_all()
     db.create_all()
-    user_datastore.create_user(username=secrets_dict['admin_username'],
-                               password=hash_password(secrets_dict['admin_password']))
     db.session.commit()
 
 
