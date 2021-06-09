@@ -1,19 +1,21 @@
+from json import load
+
 from flask import Flask, url_for, redirect
-from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, helpers, AdminIndexView
 from flask_admin.contrib.sqla import ModelView
-from flask_security import Security, SQLAlchemyUserDatastore, UserMixin, RoleMixin, current_user
-from sqlalchemy.orm import backref
-from json import load
+from flask_security import Security, SQLAlchemyUserDatastore, current_user
+from sqlalchemy import event
+
+from models import User, Role, Address, Item, NameToAddress, FullNameToAddress, db
 
 
 with open('secrets.json') as secrets_file:
     secrets_dict = load(secrets_file)
 
+
 app = Flask(__name__)
 app.config.from_object('config')
-
-db = SQLAlchemy(app)
+db.init_app(app)
 
 
 class ModelViewWithLogin(AdminIndexView):
@@ -31,66 +33,36 @@ class ModelViewWithLogin(AdminIndexView):
 
 admin = Admin(app, 'Administrator panel', index_view=ModelViewWithLogin())
 
-users_to_roles = db.Table(
-    'users_to_roles',
-    db.Column('user_id', db.Integer, db.ForeignKey('user.id')),
-    db.Column('role_id', db.Integer, db.ForeignKey('role.id'))
-)
+
+def create_all_children_with_new_parent_name(new_parent_full_name):
+    for child in Address.query.filter_by(parent_address=new_parent_full_name.address).all():
+        for child_name in NameToAddress.query.filter_by(address=child).all():
+            full_child_name = FullNameToAddress(
+                address=child,
+                full_name=f'{new_parent_full_name.full_name} {child.type} {child_name.name}'
+            )
+            db.session.add(full_child_name)
+            create_all_children_with_new_parent_name(full_child_name)
 
 
-class User(db.Model, UserMixin):
-    id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
-    email = db.Column(db.String(30), unique=True)
-    password = db.Column(db.String(255))
-    active = db.Column(db.Boolean())
-    confirmed_at = db.Column(db.DateTime())
-    roles = db.relationship('Role', secondary=users_to_roles, backref=db.backref('users', lazy='dynamic'))
+@event.listens_for(NameToAddress, 'after_insert')
+def create_full_name(mapper, connection, target):
+    parent_full_names = FullNameToAddress.query.filter_by(address=target.address.parent_address).all()
+    if not parent_full_names:
+        new_parent_full_name = FullNameToAddress(
+            address=target.address,
+            full_name=f'{target.address.type} {target.name}'
+        )
+        db.session.add(new_parent_full_name)
+        create_all_children_with_new_parent_name(new_parent_full_name)
 
-
-class Role(db.Model, RoleMixin):
-    id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
-    name = db.Column(db.String(30), unique=True)
-    description = db.Column(db.String(255))
-
-
-class NameToAddress(db.Model):
-    id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
-    name = db.Column(db.String, unique=True)
-    address_id = db.Column(db.Integer, db.ForeignKey('addresses.id'))
-    address = db.relationship('Address')
-
-
-class Address(db.Model):
-    __tablename__ = "addresses"
-    id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
-    parent_id = db.Column(db.Integer, db.ForeignKey('addresses.id'))
-    parent_address = db.relationship('Address', remote_side=[id])
-    type = db.Column(db.String)
-
-    def __repr__(self, object_to_repr=None):
-        self_name = NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(address=self).first().name if \
-            NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(address=self).first() else self.id
-        if not self.parent_address:
-            return f'<Address {self.type} {self_name}>'
-        elif not object_to_repr:
-            return f'<Address {self.__repr__(object_to_repr=self.parent_address)} {self.type} {self_name}>'
-        object_to_repr_name = NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(
-            address=object_to_repr).first().name if NameToAddress.query.order_by(-1*NameToAddress.id).filter_by(
-            address=object_to_repr).first() else object_to_repr.id
-        if object_to_repr.parent_address:
-            return f'{self.__repr__(object_to_repr=object_to_repr.parent_address)} {object_to_repr.type} {object_to_repr_name}'
-        else:
-            return f'{object_to_repr.type} {object_to_repr_name}'
-
-
-class Item(db.Model):
-    id = db.Column(db.Integer(), primary_key=True, autoincrement=True)
-    name = db.Column(db.String, unique=True)
-    address_id = db.Column(db.Integer, db.ForeignKey('addresses.id'))
-    address = db.relationship('Address')
-
-    def __repr__(self):
-        return '<Item %r>' % self.name
+    for FullParentAddressName in parent_full_names:
+        new_parent_full_name = FullNameToAddress(
+            address=target.address,
+            full_name=f'{FullParentAddressName.full_name} {target.address.type} {target.name}'
+        )
+        db.session.add(new_parent_full_name)
+        create_all_children_with_new_parent_name(new_parent_full_name)
 
 
 user_datastore = SQLAlchemyUserDatastore(db, User, Role)
@@ -98,6 +70,7 @@ security = Security(app, user_datastore)
 admin.add_view(ModelView(Item, db.session))
 admin.add_view(ModelView(Address, db.session))
 admin.add_view(ModelView(NameToAddress, db.session))
+admin.add_view(ModelView(FullNameToAddress, db.session))
 
 
 @app.before_first_request
